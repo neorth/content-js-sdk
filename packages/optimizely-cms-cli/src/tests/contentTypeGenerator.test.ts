@@ -36,6 +36,7 @@ describe('generateContentTypeFiles', () => {
       contentTypes,
       displayTemplatesByContentType,
       outputDir,
+      new Set(['TestType']),
     );
     expect(files).toHaveLength(1);
     const filePath = path.join(outputDir, files[0]);
@@ -59,6 +60,7 @@ describe('generateContentTypeFiles', () => {
         invalidContentTypes,
         displayTemplatesByContentType,
         outputDir,
+        new Set(),
       ),
     ).rejects.toThrow(
       'Invalid key "***": must contain at least one alphanumeric character',
@@ -339,8 +341,8 @@ describe('generateContentTypeCode', () => {
       );
 
       // Should import from ../component/SEO.js, not ./SEO.js
-      expect(code).toContain("import { SEOCT } from '../component/SEO.js';");
-      expect(code).not.toContain("import { SEOCT } from './SEO.js';");
+      expect(code).toContain("import { SEOCT } from '../component/SEO';");
+      expect(code).not.toContain("import { SEOCT } from './SEO';");
     });
 
     it('should generate same-directory import path for same-group component references', () => {
@@ -369,7 +371,7 @@ describe('generateContentTypeCode', () => {
       );
 
       // Should import from ./Button.js for same group
-      expect(code).toContain("import { ButtonCT } from './Button.js';");
+      expect(code).toContain("import { ButtonCT } from './Button';");
     });
 
     it('should generate same-directory import when no grouping is used', () => {
@@ -388,7 +390,237 @@ describe('generateContentTypeCode', () => {
       const code = generateContentTypeCode(contentType);
 
       // Should use default same-directory import
-      expect(code).toContain("import { SEOCT } from './SEO.js';");
+      expect(code).toContain("import { SEOCT } from './SEO';");
+    });
+  });
+
+  describe('allowedTypes and restrictedTypes variable references', () => {
+    it('should emit variable references for known content type keys in allowedTypes', () => {
+      const contentType: ContentType = {
+        key: 'BlogPage',
+        baseType: '_page',
+        properties: {
+          featuredArticle: {
+            type: 'content',
+            allowedTypes: ['Article'],
+          },
+        },
+      };
+      const allContentTypeKeys = new Set(['Article', 'BlogPage']);
+      const code = generateContentTypeCode(contentType, undefined, undefined, allContentTypeKeys);
+
+      expect(code).toContain('allowedTypes: [ArticleCT]');
+      expect(code).toContain("import { ArticleCT } from './Article';");
+    });
+
+    it('should emit string literals for base types in allowedTypes', () => {
+      const contentType: ContentType = {
+        key: 'Container',
+        baseType: '_page',
+        properties: {
+          items: {
+            type: 'content',
+            allowedTypes: ['_page', '_component'],
+          },
+        },
+      };
+      const allContentTypeKeys = new Set(['Container']);
+      const code = generateContentTypeCode(contentType, undefined, undefined, allContentTypeKeys);
+
+      expect(code).toContain("allowedTypes: ['_page', '_component']");
+      expect(code).not.toContain('import { ArticleCT');
+    });
+
+    it("should emit '_self' for self-references in allowedTypes", () => {
+      const contentType: ContentType = {
+        key: 'Article',
+        baseType: '_page',
+        properties: {
+          related: {
+            type: 'content',
+            allowedTypes: ['Article'],
+          },
+        },
+      };
+      const allContentTypeKeys = new Set(['Article']);
+      const code = generateContentTypeCode(contentType, undefined, undefined, allContentTypeKeys);
+
+      expect(code).toContain("allowedTypes: ['_self']");
+      // Should NOT import itself
+      expect(code).not.toContain("import { ArticleCT }");
+    });
+
+    it("should emit '_self' when the literal '_self' appears in allowedTypes", () => {
+      const contentType: ContentType = {
+        key: 'Article',
+        baseType: '_page',
+        properties: {
+          related: {
+            type: 'content',
+            allowedTypes: ['_self'],
+          },
+        },
+      };
+      const allContentTypeKeys = new Set(['Article']);
+      const code = generateContentTypeCode(contentType, undefined, undefined, allContentTypeKeys);
+
+      expect(code).toContain("allowedTypes: ['_self']");
+    });
+
+    it('should handle mixed arrays with known types, base types, and unknown types', () => {
+      const contentType: ContentType = {
+        key: 'Container',
+        baseType: '_page',
+        properties: {
+          items: {
+            type: 'content',
+            allowedTypes: ['Article', '_page', 'SomeUnknownType'],
+          },
+        },
+      };
+      const allContentTypeKeys = new Set(['Article', 'Container']);
+      const code = generateContentTypeCode(contentType, undefined, undefined, allContentTypeKeys);
+
+      expect(code).toContain("allowedTypes: [ArticleCT, '_page', 'SomeUnknownType']");
+      expect(code).toContain("import { ArticleCT } from './Article';");
+    });
+
+    it('should emit variable references for known content type keys in restrictedTypes', () => {
+      const contentType: ContentType = {
+        key: 'BlogPage',
+        baseType: '_page',
+        properties: {
+          content: {
+            type: 'contentReference',
+            restrictedTypes: ['PrivateArticle'],
+          },
+        },
+      };
+      const allContentTypeKeys = new Set(['PrivateArticle', 'BlogPage']);
+      const code = generateContentTypeCode(contentType, undefined, undefined, allContentTypeKeys);
+
+      expect(code).toContain('restrictedTypes: [PrivateArticleCT]');
+      expect(code).toContain("import { PrivateArticleCT } from './PrivateArticle';");
+    });
+
+    it('should fall back to string literals when allContentTypeKeys is not provided', () => {
+      const contentType: ContentType = {
+        key: 'BlogPage',
+        baseType: '_page',
+        properties: {
+          featuredArticle: {
+            type: 'content',
+            allowedTypes: ['Article'],
+          },
+        },
+      };
+      // No allContentTypeKeys — legacy behavior
+      const code = generateContentTypeCode(contentType);
+
+      expect(code).toContain("allowedTypes: ['Article']");
+      expect(code).not.toContain('import { ArticleCT }');
+    });
+
+    it('should generate correct cross-group import path for allowedTypes references', () => {
+      const contentTypeToGroupMap = new Map<string, string>([
+        ['BlogPage', 'page'],
+        ['Article', 'page'],
+        ['Hero', 'component'],
+      ]);
+      const contentType: ContentType = {
+        key: 'BlogPage',
+        baseType: '_page',
+        properties: {
+          featuredArticle: {
+            type: 'content',
+            allowedTypes: ['Article', 'Hero'],
+          },
+        },
+      };
+      const allContentTypeKeys = new Set(['BlogPage', 'Article', 'Hero']);
+      const code = generateContentTypeCode(
+        contentType,
+        contentTypeToGroupMap,
+        'page',
+        allContentTypeKeys,
+      );
+
+      expect(code).toContain('allowedTypes: [ArticleCT, HeroCT]');
+      // Article is same group → ./Article
+      expect(code).toContain("import { ArticleCT } from './Article';");
+      // Hero is different group → ../component/Hero
+      expect(code).toContain("import { HeroCT } from '../component/Hero';");
+    });
+  });
+
+  describe('mayContainTypes variable references', () => {
+    it('should emit variable references for known content type keys in mayContainTypes', () => {
+      const contentType: ContentType = {
+        key: 'BlogPage',
+        baseType: '_page',
+        mayContainTypes: ['Article'],
+        properties: {},
+      };
+      const allContentTypeKeys = new Set(['Article', 'BlogPage']);
+      const code = generateContentTypeCode(contentType, undefined, undefined, allContentTypeKeys);
+
+      expect(code).toContain('mayContainTypes: [ArticleCT]');
+      expect(code).toContain("import { ArticleCT } from './Article';");
+    });
+
+    it('should emit string literals for base types in mayContainTypes', () => {
+      const contentType: ContentType = {
+        key: 'Folder',
+        baseType: '_folder',
+        mayContainTypes: ['_component', '_page'],
+        properties: {},
+      };
+      const allContentTypeKeys = new Set(['Folder']);
+      const code = generateContentTypeCode(contentType, undefined, undefined, allContentTypeKeys);
+
+      expect(code).toContain("mayContainTypes: ['_component', '_page']");
+      expect(code).not.toContain('import { FolderCT');
+    });
+
+    it("should emit '_self' for self-references in mayContainTypes", () => {
+      const contentType: ContentType = {
+        key: 'BlogPage',
+        baseType: '_page',
+        mayContainTypes: ['BlogPage'],
+        properties: {},
+      };
+      const allContentTypeKeys = new Set(['BlogPage']);
+      const code = generateContentTypeCode(contentType, undefined, undefined, allContentTypeKeys);
+
+      expect(code).toContain("mayContainTypes: ['_self']");
+      expect(code).not.toContain("import { BlogPageCT }");
+    });
+
+    it('should handle mixed mayContainTypes with known types and base types', () => {
+      const contentType: ContentType = {
+        key: 'BlogPage',
+        baseType: '_page',
+        mayContainTypes: ['Article', '_component', 'BlogPage'],
+        properties: {},
+      };
+      const allContentTypeKeys = new Set(['Article', 'BlogPage']);
+      const code = generateContentTypeCode(contentType, undefined, undefined, allContentTypeKeys);
+
+      expect(code).toContain("mayContainTypes: [ArticleCT, '_component', '_self']");
+      expect(code).toContain("import { ArticleCT } from './Article';");
+    });
+
+    it('should fall back to string literals when allContentTypeKeys is not provided', () => {
+      const contentType: ContentType = {
+        key: 'BlogPage',
+        baseType: '_page',
+        mayContainTypes: ['Article'],
+        properties: {},
+      };
+      const code = generateContentTypeCode(contentType);
+
+      expect(code).toContain("mayContainTypes: ['Article']");
+      expect(code).not.toContain('import { ArticleCT }');
     });
   });
 });

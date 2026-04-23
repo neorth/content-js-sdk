@@ -197,6 +197,11 @@ export default class ConfigPull extends BaseCommand<typeof ConfigPull> {
       const contentTypeCount = manifest.contentTypes.length;
       spinner.text = `Generating files for ${contentTypeCount} content type${contentTypeCount !== 1 ? 's' : ''}`;
 
+      // Build set of all content type keys for variable reference generation
+      const allContentTypeKeys = new Set<string>(
+        manifest.contentTypes.map((ct: any) => ct.key),
+      );
+
       // Ensure output directory exists
       await mkdir(outputDir, { recursive: true });
 
@@ -231,11 +236,6 @@ export default class ConfigPull extends BaseCommand<typeof ConfigPull> {
             manifest.displayTemplates,
           );
 
-          // Build a set of all content type keys for quick lookup
-          const allContentTypeKeys = new Set(
-            manifest.contentTypes.map((ct: any) => ct.key),
-          );
-
           for (const template of processedTemplates) {
             // Templates with baseType or nodeType cannot be matched to a specific content type
             // Only templates with contentType field can be matched
@@ -266,6 +266,7 @@ export default class ConfigPull extends BaseCommand<typeof ConfigPull> {
             groups[group],
             displayTemplatesByContentType,
             groupDir,
+            allContentTypeKeys,
             contentTypeToGroupMap,
             parsedGroupName,
           );
@@ -318,6 +319,7 @@ export default class ConfigPull extends BaseCommand<typeof ConfigPull> {
           manifest.contentTypes as unknown as ContentType[],
           new Map(), // No display template grouping in non-grouped mode
           outputDir,
+          allContentTypeKeys,
         );
 
         // List generated files

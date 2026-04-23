@@ -15,6 +15,7 @@ export async function generateContentTypeFiles(
   contentTypes: ContentType[],
   displayTemplatesByContentType: Map<string, DisplayTemplate[]>,
   outputDir: string,
+  allContentTypeKeys: Set<string>,
   contentTypeToGroupMap?: Map<string, string>,
   currentGroup?: string,
 ): Promise<string[]> {
@@ -28,6 +29,7 @@ export async function generateContentTypeFiles(
         contentType,
         contentTypeToGroupMap,
         currentGroup,
+        allContentTypeKeys,
       );
 
       // Append display templates for this specific content type
@@ -97,40 +99,20 @@ export function generateContentTypeCode(
   contentType: ContentType,
   contentTypeToGroupMap?: Map<string, string>,
   currentGroup?: string,
+  allContentTypeKeys?: Set<string>,
 ): string {
   const exportName = generateExportName(contentType.key);
 
-  // Collect component imports
+  // Collect component imports (used for both component properties, allowedTypes, restrictedTypes, and mayContainTypes)
   const componentImports = new Set<string>();
   const properties = contentType.properties
     ? generatePropertiesCode(
         contentType.properties,
         contentType.key,
         componentImports,
+        allContentTypeKeys,
       )
     : '{}';
-
-  // Generate import statements
-  const imports = ["import { contentType } from '@optimizely/cms-sdk';"];
-  if (componentImports.size > 0) {
-    const importStatements = Array.from(componentImports).map((key) => {
-      const fileName = generateFileName(key);
-      const exportName = generateExportName(key);
-
-      // Calculate relative import path when grouping is enabled
-      let importPath = `./${fileName.replace('.ts', '.js')}`;
-      if (contentTypeToGroupMap && currentGroup) {
-        const targetGroup = contentTypeToGroupMap.get(key);
-        if (targetGroup && targetGroup !== currentGroup) {
-          // Different group - use relative path
-          importPath = `../${targetGroup}/${fileName.replace('.ts', '.js')}`;
-        }
-      }
-
-      return `import { ${exportName} } from '${importPath}';`;
-    });
-    imports.push(...importStatements);
-  }
 
   // Generate compositionBehaviors if present
   const compositionBehaviors =
@@ -139,11 +121,36 @@ export function generateContentTypeCode(
       ? `\n  compositionBehaviors: [${contentType.compositionBehaviors.map((b) => `'${escapeSingleQuote(b)}'`).join(', ')}],`
       : '';
 
-  // Generate mayContainTypes if present
+  // Generate mayContainTypes if present — must be processed before imports so
+  // any referenced content type keys are added to componentImports
   const mayContainTypes =
     contentType.mayContainTypes && contentType.mayContainTypes.length > 0
-      ? `\n  mayContainTypes: [${contentType.mayContainTypes.map((t) => `'${escapeSingleQuote(t)}'`).join(', ')}],`
+      ? `\n  mayContainTypes: [${contentType.mayContainTypes
+          .map((t) => classifyTypeRef(t, contentType.key, componentImports, allContentTypeKeys))
+          .join(', ')}],`
       : '';
+
+  // Generate import statements (after mayContainTypes and properties are processed)
+  const imports = ["import { contentType } from '@optimizely/cms-sdk';"];
+  if (componentImports.size > 0) {
+    const importStatements = Array.from(componentImports).map((key) => {
+      const fileName = generateFileName(key);
+      const exportName = generateExportName(key);
+
+      // Calculate relative import path when grouping is enabled
+      let importPath = `./${fileName.replace('.ts', '')}`;
+      if (contentTypeToGroupMap && currentGroup) {
+        const targetGroup = contentTypeToGroupMap.get(key);
+        if (targetGroup && targetGroup !== currentGroup) {
+          // Different group - use relative path
+          importPath = `../${targetGroup}/${fileName.replace('.ts', '')}`;
+        }
+      }
+
+      return `import { ${exportName} } from '${importPath}';`;
+    });
+    imports.push(...importStatements);
+  }
 
   const code = `${imports.join('\n')}
 
@@ -171,12 +178,43 @@ function generateExportName(key: string): string {
 }
 
 /**
+ * Classifies a single entry from allowedTypes, restrictedTypes, or mayContainTypes
+ * and returns its code representation:
+ * - Self-reference (value === '_self' or value === current key) → `'_self'`
+ * - Base type (underscore-prefixed, e.g. '_page') → string literal `'_page'`
+ * - Known content type key (in allContentTypeKeys) → variable reference e.g. `ArticleCT`,
+ *   and adds the key to componentImports so an import is generated
+ * - Unknown value → string literal fallback
+ */
+function classifyTypeRef(
+  value: string,
+  contentTypeKey: string,
+  componentImports: Set<string>,
+  allContentTypeKeys?: Set<string>,
+): string {
+  if (value === '_self' || value === contentTypeKey) {
+    return `'_self'`;
+  }
+  // Built-in CMS base types are always underscore-prefixed (e.g. _page, _component)
+  if (/^_/.test(value)) {
+    return `'${escapeSingleQuote(value)}'`;
+  }
+  if (allContentTypeKeys && allContentTypeKeys.has(value)) {
+    componentImports.add(value);
+    return generateExportName(value);
+  }
+  // Unknown type — fall back to string literal
+  return `'${escapeSingleQuote(value)}'`;
+}
+
+/**
  * Generates the properties object code
  */
 function generatePropertiesCode(
   properties: Record<string, ContentTypeProperties.All>,
   contentTypeKey: string,
   componentImports: Set<string>,
+  allContentTypeKeys?: Set<string>,
 ): string {
   const propertyEntries = Object.entries(properties).map(([name, prop]) => {
     const safeKey = /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)
@@ -186,6 +224,7 @@ function generatePropertiesCode(
       prop,
       contentTypeKey,
       componentImports,
+      allContentTypeKeys,
     );
     return `    ${safeKey}: ${propertyDef}`;
   });
@@ -204,6 +243,7 @@ function generatePropertyDefinition(
   property: ContentTypeProperties.All,
   contentTypeKey: string,
   componentImports: Set<string>,
+  allContentTypeKeys?: Set<string>,
 ): string {
   if ('items' in property && property.type === 'array') {
     // Array type
@@ -211,6 +251,7 @@ function generatePropertyDefinition(
       property.items,
       contentTypeKey,
       componentImports,
+      allContentTypeKeys,
     );
     return `{\n      type: 'array',\n      items: ${itemDef},\n    }`;
   }
@@ -321,8 +362,7 @@ function generatePropertyDefinition(
       property.allowedTypes.length > 0
     ) {
       const types = property.allowedTypes
-        .map((t) => (t === '_self' ? contentTypeKey : t))
-        .map((t) => `'${escapeSingleQuote(t)}'`)
+        .map((t) => classifyTypeRef(t, contentTypeKey, componentImports, allContentTypeKeys))
         .join(', ');
       parts.push(`allowedTypes: [${types}]`);
     }
@@ -333,8 +373,7 @@ function generatePropertyDefinition(
       property.restrictedTypes.length > 0
     ) {
       const types = property.restrictedTypes
-        .map((t) => (t === '_self' ? contentTypeKey : t))
-        .map((t) => `'${escapeSingleQuote(t)}'`)
+        .map((t) => classifyTypeRef(t, contentTypeKey, componentImports, allContentTypeKeys))
         .join(', ');
       parts.push(`restrictedTypes: [${types}]`);
     }
